@@ -1,0 +1,7 @@
+environment         = "staging"
+aws_region          = "us-east-1"
+container_image     = "123456789012.dkr.ecr.us-east-1.amazonaws.com/ai-integration-gateway:1.0.0"
+desired_count       = 2
+database_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:aigw/db"
+redis_url           = "rediss://redis.internal:6379/0"
+kafka_bootstrap     = "kafka.internal:9092"
