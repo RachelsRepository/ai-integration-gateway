@@ -49,6 +49,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     await uow.tenants.upsert(tenant)
                     await uow.api_keys.add(api_key)
                     await uow.commit()
+                    # Local-only bootstrap aid. Printed outside structured logging so the
+                    # secret scrubber does not mask the one-time developer credential.
+                    print(
+                        f"LOCAL DEMO API KEY (never use outside local): {plaintext}",
+                        flush=True,
+                    )
                     logger.info("demo_tenant_seeded", api_key_prefix=api_key.prefix)
                     app.state.demo_api_key = plaintext
                 else:

@@ -27,7 +27,6 @@ FROM python:3.12-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
-    AIGW_ENVIRONMENT=production \
     AIGW_HOST=0.0.0.0 \
     AIGW_PORT=8000
 
@@ -48,8 +47,8 @@ USER gateway
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')" || exit 1
+# Health checks belong in Compose/orchestrator service definitions. This image serves
+# api, worker, and migrate roles, so a single image HEALTHCHECK would be incorrect.
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["api"]

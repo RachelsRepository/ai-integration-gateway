@@ -32,3 +32,11 @@ lookups never cross tenant boundaries.
 Credentials are referenced, not inlined, in configuration. The secret resolver supports
 environment variables and files; production deployments should inject values from a
 secrets manager into those references.
+
+Production-like environments (`staging`, `production`) reject:
+
+- `debug=true`
+- OpenAPI docs enabled
+- `literal://` API-key pepper references and placeholder `change-me` values
+- JWT enabled without JWKS or a shared-secret reference
+- Wildcard CORS origins or trusted hosts

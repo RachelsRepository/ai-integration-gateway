@@ -40,13 +40,18 @@ Echo provider is always available for local development and contract tests.
 
 ## Persistence
 
-- PostgreSQL holds tenants, credentials, conversations, prompts, agent runs, usage,
-  audit events and the transactional outbox.
-- Redis holds response/embedding caches, rate-limit counters and distributed locks.
-- An in-memory unit of work mirrors the same repository ports for fast tests.
+- Alembic migrations define the PostgreSQL schema for tenants, credentials, conversations,
+  prompts, agent runs, usage, audit events and the transactional outbox.
+- The default composition root wires an in-memory unit of work that implements the same
+  repository ports (used for local development and the automated test suite). Production
+  deployments should replace that factory with a SQLAlchemy-backed unit of work against
+  the migrated schema.
+- Redis adapters provide response/embedding caches, rate-limit counters and distributed
+  locks; local mode may substitute the in-memory cache.
 
 ## Events
 
-Domain events are written to the outbox in the same database transaction as business
-writes, then relayed to Kafka by a worker. This preserves at-least-once delivery without
-dual-write races.
+Domain events are written to the outbox in the same transaction as business writes. A
+background relay publishes unpublished rows and moves exhausted failures to a dead-letter
+queue. A Kafka publisher adapter is provided; the default local composition uses an
+in-memory publisher so the stack runs without a broker.

@@ -59,12 +59,12 @@ sequenceDiagram
 sequenceDiagram
     participant Worker as OutboxRelayJob
     participant DB
-    participant Kafka
+    participant Bus as EventPublisher
     participant DLQ
 
     Worker->>DB: fetch_unpublished
     loop each event
-        Worker->>Kafka: publish
+        Worker->>Bus: publish
         alt success
             Worker->>DB: mark_published
         else exhausted attempts

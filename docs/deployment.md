@@ -17,12 +17,17 @@ docker build -t ai-integration-gateway:1.0.0 .
 docker run --rm -p 8000:8000 \
   -e AIGW_ENVIRONMENT=local \
   -e AIGW_AUTH_JWT_ENABLED=false \
+  -e AIGW_KAFKA_ENABLED=false \
   -e AIGW_PROVIDER_ENABLED='["echo"]' \
-  -e AIGW_AUTH_API_KEY_PEPPER_REF=literal://change-me \
+  -e AIGW_AUTH_API_KEY_PEPPER_REF=literal://local-dev-pepper-change-me \
   ai-integration-gateway:1.0.0
 ```
 
 Entrypoint roles: `api`, `worker`, `migrate`.
+
+Production images must set `AIGW_ENVIRONMENT=staging|production`, disable docs
+(`AIGW_DOCS_ENABLED=false`), supply non-literal secret references for the API-key pepper,
+and configure JWT (JWKS or shared secret) and/or API keys with explicit trusted hosts.
 
 ## Terraform
 

@@ -39,8 +39,12 @@ In another terminal:
 curl -s http://127.0.0.1:8000/health/live
 ```
 
-On first local boot the gateway seeds a demo tenant and prints an API key prefix.
-Create a key via the seeded demo flow or mint one in tests using `ApiKeyHasher`.
+On first local boot the gateway seeds a demo tenant and prints a one-time
+`LOCAL DEMO API KEY` to stdout. Export it before calling protected routes:
+
+```bash
+export AIGW_API_KEY='…paste key from server logs…'
+```
 
 Example chat request:
 
@@ -61,7 +65,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 docker compose up --build
 ```
 
-Services: PostgreSQL, Redis, Kafka/Zookeeper, API, worker, and a one-shot migration.
+Services: PostgreSQL, Redis, Kafka (KRaft), API, worker, and a one-shot migration.
 
 ## Quality gates
 

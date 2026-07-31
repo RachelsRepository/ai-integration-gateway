@@ -312,12 +312,20 @@ class Settings(_Base):
             return self
         if self.debug:
             raise ValueError("debug must be disabled outside development")
+        if self.docs_enabled:
+            raise ValueError("OpenAPI documentation must be disabled in production")
         if not self.auth.jwt_enabled and not self.auth.api_keys_enabled:
             raise ValueError("At least one authentication method must be enabled")
         if self.auth.jwt_enabled and not self.auth.jwks_url and not self.auth.jwt_shared_secret_ref:
             raise ValueError("JWT validation requires either a JWKS URL or a shared secret")
+        if self.auth.api_key_pepper_ref.startswith("literal://"):
+            raise ValueError("API key pepper must not use literal:// references in production")
+        if "change-me" in self.auth.api_key_pepper_ref.lower():
+            raise ValueError("API key pepper still uses a placeholder value")
         if "*" in self.security.cors_allowed_origins:
             raise ValueError("Wildcard CORS origins are not permitted in production")
+        if "*" in self.security.trusted_hosts:
+            raise ValueError("Wildcard trusted hosts are not permitted in production")
         return self
 
     @property

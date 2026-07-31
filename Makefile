@@ -39,10 +39,10 @@ openapi:
 	PYTHONPATH=src $(PYTHON) -m ai_gateway.cli openapi --output openapi.json
 
 run:
-	PYTHONPATH=src AIGW_ENVIRONMENT=local AIGW_AUTH_JWT_ENABLED=false AIGW_PROVIDER_ENABLED='["echo"]' AIGW_OTEL_LOG_FORMAT=console $(PYTHON) -m ai_gateway
+	PYTHONPATH=src AIGW_ENVIRONMENT=local AIGW_AUTH_JWT_ENABLED=false AIGW_KAFKA_ENABLED=false AIGW_PROVIDER_ENABLED='["echo"]' AIGW_OTEL_LOG_FORMAT=console $(PYTHON) -m ai_gateway
 
 worker:
-	PYTHONPATH=src AIGW_ENVIRONMENT=local AIGW_PROVIDER_ENABLED='["echo"]' $(PYTHON) -m ai_gateway.workers.main
+	PYTHONPATH=src AIGW_ENVIRONMENT=local AIGW_KAFKA_ENABLED=false AIGW_PROVIDER_ENABLED='["echo"]' $(PYTHON) -m ai_gateway.workers.main
 
 migrate:
 	PYTHONPATH=src $(PYTHON) -m alembic upgrade head
