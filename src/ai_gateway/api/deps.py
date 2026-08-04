@@ -33,6 +33,7 @@ async def get_request_context(
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     x_request_id: Annotated[str | None, Header(alias="X-Request-ID")] = None,
     x_idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    x_scenario: Annotated[str | None, Header(alias="X-Scenario")] = None,
 ) -> RequestContext:
     """Authenticate the caller and build a request context.
 
@@ -43,6 +44,7 @@ async def get_request_context(
         x_api_key: API key header.
         x_request_id: Optional caller-supplied request identifier.
         x_idempotency_key: Optional idempotency key.
+        x_scenario: Local/test-only provider scenario override.
 
     Returns:
         The populated request context.
@@ -55,6 +57,9 @@ async def get_request_context(
             uow, api_key=x_api_key, bearer_token=bearer
         )
         await uow.commit()
+    scenario = None
+    if x_scenario and container.settings.provider_scenario_forwarding:
+        scenario = x_scenario.strip().lower() or None
     return RequestContext(
         principal=principal,
         tenant=tenant,
@@ -63,6 +68,7 @@ async def get_request_context(
         user_agent=request.headers.get("user-agent"),
         idempotency_key=x_idempotency_key,
         deadline_seconds=container.services.default_timeout_seconds,
+        provider_scenario=scenario,
     )
 
 

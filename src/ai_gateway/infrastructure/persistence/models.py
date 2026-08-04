@@ -46,6 +46,10 @@ class TenantModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    api_keys: Mapped[list[ApiKeyModel]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
 
 
 class ApiKeyModel(Base):
@@ -69,6 +73,7 @@ class ApiKeyModel(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tenant: Mapped[TenantModel] = relationship(back_populates="api_keys")
 
 
 class ConversationModel(Base):

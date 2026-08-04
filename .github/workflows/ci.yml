@@ -73,3 +73,99 @@ jobs:
       - run: terraform fmt -check -recursive
       - run: terraform init -backend=false
       - run: terraform validate
+
+  runtime:
+    name: Runtime Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start HA stack
+        run: docker compose --profile ha up --build -d
+
+      - name: Wait for stack readiness
+        run: |
+          chmod +x scripts/*.sh
+          REQUIRE_HA=1 \
+            AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 \
+            API_BASE_B=http://127.0.0.1:18003 \
+            scripts/wait_for_stack.sh
+
+      - name: Integration (SQLAlchemy UoW)
+        run: |
+          docker compose run --rm --entrypoint "" \
+            -e AIGW_TEST_DB_DSN=postgresql+asyncpg://gateway:gateway@postgres:5432/gateway \
+            -v "$PWD/tests:/tests:ro" \
+            -v "$PWD/src:/src:ro" \
+            api \
+            sh -c 'pip install -q pytest pytest-asyncio aiosqlite && PYTHONPATH=/src pytest /tests/integration -q --tb=short'
+
+      - name: Compose e2e
+        run: |
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 scripts/e2e_compose.sh
+
+      - name: Embeddings recreate regression
+        run: |
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 RECREATE_ROUNDS=2 \
+            scripts/recreate_embeddings_compose.sh
+
+      - name: HA quota and scenario matrix
+        run: |
+          API_BASE_A=http://127.0.0.1:18000 API_BASE_B=http://127.0.0.1:18003 \
+            AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            scripts/ha_quota_compose.sh
+
+      - name: Provider failure matrix
+        run: |
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 scripts/provider_matrix_compose.sh
+
+      - name: Agent mid-run resume
+        run: |
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 scripts/agent_resume_compose.sh
+
+      - name: Chaos subset
+        run: |
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 scripts/chaos_compose.sh
+
+      - name: Load smoke
+        run: |
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 LOAD_CONCURRENCY=4 LOAD_REQUESTS=20 \
+            scripts/load_compose.sh
+
+      - name: Second clean run
+        run: |
+          docker compose --profile ha down -v --remove-orphans
+          docker compose --profile ha up --build -d
+          REQUIRE_HA=1 \
+            AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 \
+            API_BASE_B=http://127.0.0.1:18003 \
+            scripts/wait_for_stack.sh
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 scripts/e2e_compose.sh
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 RECREATE_ROUNDS=1 \
+            scripts/recreate_embeddings_compose.sh
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE_A=http://127.0.0.1:18000 API_BASE_B=http://127.0.0.1:18003 \
+            scripts/ha_quota_compose.sh
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 scripts/agent_resume_compose.sh
+          AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+            API_BASE=http://127.0.0.1:18000 scripts/provider_matrix_compose.sh
+
+      - name: Capture logs on failure
+        if: failure()
+        run: docker compose --profile ha logs --no-color | tail -400
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile ha down -v --remove-orphans

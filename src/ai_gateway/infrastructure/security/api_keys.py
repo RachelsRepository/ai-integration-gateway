@@ -62,6 +62,7 @@ class ApiKeyHasher:
         tenant_id: TenantId,
         name: str = "default",
         roles: frozenset[Role] | None = None,
+        plaintext: str | None = None,
     ) -> tuple[str, ApiKey]:
         """Mint a new credential for a tenant.
 
@@ -69,11 +70,18 @@ class ApiKeyHasher:
             tenant_id: Owning tenant.
             name: Human readable label.
             roles: Roles granted to bearers.
+            plaintext: Optional known secret (local demo only); otherwise generated.
 
         Returns:
             The plaintext secret (shown once) and the persistable entity.
         """
-        plaintext, prefix, hashed = self.generate()
+        if plaintext is None:
+            plaintext, prefix, hashed = self.generate()
+        else:
+            if not plaintext.startswith("aigw_"):
+                raise ValueError("API keys must start with aigw_")
+            prefix = plaintext[: self._prefix_length]
+            hashed = self.hash(plaintext)
         entity = ApiKey(
             tenant_id=tenant_id,
             prefix=prefix,

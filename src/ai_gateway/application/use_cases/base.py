@@ -84,12 +84,16 @@ class GatewayServices:
         Returns:
             A populated :class:`ProviderCallContext`.
         """
+        extra_headers: dict[str, str] = {}
+        if context.provider_scenario:
+            extra_headers["X-Scenario"] = context.provider_scenario
         return ProviderCallContext(
             request_id=context.request_id,
             tenant_id=context.tenant_id,
             timeout_seconds=timeout or min(self.default_timeout_seconds, context.deadline_seconds),
             idempotency_key=context.idempotency_key,
             trace_id=context.trace_id,
+            extra_headers=extra_headers,
         )
 
 

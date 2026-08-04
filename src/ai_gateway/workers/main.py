@@ -6,8 +6,6 @@ import asyncio
 
 from ai_gateway.config.settings import get_settings
 from ai_gateway.container import build_container
-from ai_gateway.infrastructure.dlq.memory import InMemoryDeadLetterQueue
-from ai_gateway.infrastructure.events.memory import InMemoryEventPublisher
 from ai_gateway.observability.logging import configure_logging, get_logger
 from ai_gateway.workers.jobs import (
     ConversationCleanupJob,
@@ -31,9 +29,10 @@ async def _amain() -> None:
         environment=settings.environment.value,
     )
     container = await build_container(settings)
-    publisher = InMemoryEventPublisher()
-    await publisher.start()
-    dlq = InMemoryDeadLetterQueue()
+    publisher = container.event_publisher
+    dlq = container.dlq
+    if publisher is None or dlq is None:
+        raise RuntimeError("Event publisher and DLQ must be configured for workers")
     runner = WorkerRunner()
 
     usage = UsageAggregationJob(
@@ -87,8 +86,7 @@ async def _amain() -> None:
         await asyncio.Event().wait()
     finally:
         await runner.stop()
-        await publisher.stop()
-        await container.services.providers.aclose()
+        await container.aclose()
 
 
 def main() -> None:

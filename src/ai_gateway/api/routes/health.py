@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Response
 
 from ai_gateway.api.deps import get_container
 from ai_gateway.api.schemas import HealthResponse
+from ai_gateway.config.settings import PersistenceBackend
 from ai_gateway.container import AppContainer
 from ai_gateway.observability.metrics import render_metrics
 
@@ -39,10 +40,32 @@ async def readiness(
     """
     checks: list[dict[str, object]] = []
     healthy = True
+
     cache_ok = await container.services.response_cache.ping()
     checks.append({"name": "cache", "healthy": cache_ok, "critical": True})
     healthy = healthy and cache_ok
-    # Provider presence
+
+    if container.settings.persistence_backend is PersistenceBackend.POSTGRES:
+        db_ok = False
+        try:
+            async with container.services.uow_factory() as uow:
+                await uow.execute_raw("SELECT 1")
+                await uow.rollback()
+            db_ok = True
+        except Exception as exc:
+            checks.append(
+                {
+                    "name": "database",
+                    "healthy": False,
+                    "critical": True,
+                    "error": type(exc).__name__,
+                }
+            )
+            healthy = False
+        else:
+            checks.append({"name": "database", "healthy": db_ok, "critical": True})
+            healthy = healthy and db_ok
+
     provider_count = len(container.services.providers.configured())
     providers_ok = provider_count > 0
     checks.append(
@@ -54,6 +77,7 @@ async def readiness(
         }
     )
     healthy = healthy and providers_ok
+
     status = "ok" if healthy else "unavailable"
     if not healthy:
         response.status_code = 503

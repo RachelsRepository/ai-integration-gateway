@@ -100,3 +100,49 @@ async def test_unauthenticated_rejected() -> None:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.get("/v1/models")
             assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_admin_dlq_seed_redrive_and_quotas(client: AsyncClient) -> None:
+    quotas = await client.put(
+        "/v1/admin/tenants/me/quotas",
+        json={"max_requests": 50, "period": "daily"},
+    )
+    assert quotas.status_code == 200
+    assert quotas.json()["quotas"]["daily"]["max_requests"] == 50
+
+    circuits = await client.post("/v1/admin/circuits/reset")
+    assert circuits.status_code == 200
+    assert circuits.json()["status"] in {"ok", "skipped"}
+
+    seed = await client.post("/v1/admin/dlq/seed")
+    assert seed.status_code == 200
+    record_id = seed.json()["record_id"]
+
+    listed = await client.get("/v1/admin/dlq")
+    assert listed.status_code == 200
+    assert listed.json()["size"] >= 1
+
+    redrive = await client.post(f"/v1/admin/dlq/{record_id}/redrive")
+    assert redrive.status_code == 200
+    assert redrive.json()["status"] in {"resolved", "already_resolved"}
+
+    again = await client.post(f"/v1/admin/dlq/{record_id}/redrive")
+    assert again.status_code == 200
+    assert again.json()["status"] == "already_resolved"
+
+
+@pytest.mark.asyncio
+async def test_scenario_header_ignored_without_forwarding(client: AsyncClient) -> None:
+    # Default test settings leave forwarding off; request still succeeds via echo.
+    response = await client.post(
+        "/v1/chat/completions",
+        headers={"X-Scenario": "server_error"},
+        json={
+            "messages": [{"role": "user", "content": "ignore-scenario"}],
+            "model": "echo/echo-1",
+            "temperature": 0,
+            "cache": False,
+        },
+    )
+    assert response.status_code == 200

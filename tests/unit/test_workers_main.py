@@ -20,6 +20,8 @@ async def test_amain_wires_jobs_and_shuts_down() -> None:
     mock_publisher.start = AsyncMock()
     mock_publisher.stop = AsyncMock()
 
+    mock_dlq = MagicMock()
+
     mock_providers = MagicMock()
     mock_providers.aclose = AsyncMock()
 
@@ -34,6 +36,9 @@ async def test_amain_wires_jobs_and_shuts_down() -> None:
 
     mock_container = MagicMock()
     mock_container.services = mock_services
+    mock_container.event_publisher = mock_publisher
+    mock_container.dlq = mock_dlq
+    mock_container.aclose = AsyncMock()
 
     mock_settings = MagicMock()
     mock_settings.observability.log_level = "INFO"
@@ -58,8 +63,6 @@ async def test_amain_wires_jobs_and_shuts_down() -> None:
         patch.object(workers_main, "get_settings", return_value=mock_settings),
         patch.object(workers_main, "configure_logging"),
         patch.object(workers_main, "build_container", AsyncMock(return_value=mock_container)),
-        patch.object(workers_main, "InMemoryEventPublisher", return_value=mock_publisher),
-        patch.object(workers_main, "InMemoryDeadLetterQueue"),
         patch.object(workers_main, "WorkerRunner", return_value=mock_runner),
         patch("asyncio.Event", return_value=wait_event),
     ):
@@ -67,8 +70,7 @@ async def test_amain_wires_jobs_and_shuts_down() -> None:
 
     assert mock_runner.schedule.call_count == 5
     mock_runner.stop.assert_awaited_once()
-    mock_publisher.stop.assert_awaited_once()
-    mock_providers.aclose.assert_awaited_once()
+    mock_container.aclose.assert_awaited_once()
 
 
 def test_main_invokes_asyncio_run() -> None:

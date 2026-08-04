@@ -19,6 +19,7 @@ from ai_gateway.application.ports.llm_provider import (
 )
 from ai_gateway.application.ports.repositories import UnitOfWork
 from ai_gateway.application.services.guardrails import GuardrailVerdict
+from ai_gateway.application.services.quota_ledger import QuotaReservation
 from ai_gateway.application.use_cases.base import GatewayServices, load_prompt, require_messages
 from ai_gateway.domain.entities.audit import AuditOutcome
 from ai_gateway.domain.entities.conversation import Conversation
@@ -44,6 +45,7 @@ class _PreparedRequest:
     conversation: Conversation | None
     guardrails: GuardrailVerdict
     estimated_prompt_tokens: int
+    reservation: QuotaReservation | None = None
 
 
 class ChatCompletionUseCase:
@@ -107,6 +109,7 @@ class ChatCompletionUseCase:
                     prepared.decision.chain, prepared.provider_request, call_context
                 )
             except DomainError as exc:
+                await self._s.meter.release_reservation(prepared.reservation)
                 await self._record_failure(uow, context, prepared, exc)
                 await uow.commit()
                 raise
@@ -116,6 +119,11 @@ class ChatCompletionUseCase:
             usage = outcome.value.usage
             cost = self._s.meter.price(outcome.model, usage)
             latency_ms = int((self._s.clock.monotonic() - started) * 1000)
+            await self._s.meter.settle_reservation(
+                prepared.reservation,
+                actual_tokens=usage.total_tokens,
+                actual_cost=cost,
+            )
 
             if command.cache and self._s.response_cache.is_cacheable(prepared.provider_request):
                 await self._s.response_cache.set(
@@ -244,6 +252,7 @@ class ChatCompletionUseCase:
                         )
                         index += 1
             except DomainError as exc:
+                await self._s.meter.release_reservation(prepared.reservation)
                 await self._record_failure(uow, context, prepared, exc)
                 await uow.commit()
                 yield StreamEvent(type=StreamEventType.ERROR, index=index, data=exc.to_dict())
@@ -251,10 +260,17 @@ class ChatCompletionUseCase:
 
             model = served_by or prepared.decision.selected.ref
             content = self._s.guardrails.filter_output("".join(buffer))
+            estimated_usage = False
             if usage.total_tokens == 0:
                 usage = self._estimate_usage(prepared, content)
+                estimated_usage = True
             cost = self._s.meter.price(model, usage)
             latency_ms = int((self._s.clock.monotonic() - started) * 1000)
+            await self._s.meter.settle_reservation(
+                prepared.reservation,
+                actual_tokens=usage.total_tokens,
+                actual_cost=cost,
+            )
 
             message = Message(role=MessageRole.ASSISTANT, content=content)
             conversation_id = await self._persist_conversation(
@@ -269,6 +285,7 @@ class ChatCompletionUseCase:
                 cost=cost,
                 latency_ms=latency_ms,
                 metadata={"streamed": "true"},
+                estimated=estimated_usage,
             )
             await self._s.audit.record(
                 uow,
@@ -343,6 +360,14 @@ class ChatCompletionUseCase:
             projected_tokens=estimated + command.max_output_tokens,
             projected_cost=projected,
         )
+        reservation = await self._s.meter.reserve(
+            context.tenant,
+            reservation_id=str(context.request_id),
+            projected_tokens=estimated + command.max_output_tokens,
+            projected_cost=projected,
+            model=decision.selected.ref,
+            concurrency_limit=context.tenant.rate_limit_burst or None,
+        )
         await uow.outbox.enqueue(
             DomainEvent(
                 type=EventType.PROVIDER_SELECTED,
@@ -384,6 +409,7 @@ class ChatCompletionUseCase:
             conversation=conversation,
             guardrails=verdict,
             estimated_prompt_tokens=estimated,
+            reservation=reservation,
         )
 
     async def _resolve_messages(

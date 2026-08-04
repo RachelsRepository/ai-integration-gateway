@@ -14,9 +14,17 @@ venv/
 .ruff_cache/
 .coverage
 .coverage.*
+coverage.json
 htmlcov/
 coverage.xml
 .import_linter_cache/
+
+# Finder / editor duplicates
+* 2
+* (2)
+*.bak
+*.tmp
+* copy*
 
 # Environment
 .env

@@ -242,6 +242,7 @@ class OpenAIProvider:
         }
         if self._organization:
             headers["OpenAI-Organization"] = self._organization
+        headers.update(context.extra_headers)
         return headers
 
     async def _post(

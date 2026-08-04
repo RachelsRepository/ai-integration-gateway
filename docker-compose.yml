@@ -5,8 +5,6 @@ services:
       POSTGRES_DB: gateway
       POSTGRES_USER: gateway
       POSTGRES_PASSWORD: gateway
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,8 +15,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -27,8 +23,6 @@ services:
 
   kafka:
     image: apache/kafka:3.7.0
-    ports:
-      - "9092:9092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -41,17 +35,38 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    # KRaft images vary in helper script paths; readiness is enforced by API publisher retries.
+
+  provider-a:
+    build: ./services/provider_a
+    ports:
+      - "18001:18001"
+    environment:
+      PROVIDER_A_API_KEY: provider-a-secret
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 12
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18001/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  provider-b:
+    build: ./services/provider_b
+    ports:
+      - "18002:18002"
+    environment:
+      PROVIDER_B_API_KEY: provider-b-secret
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18002/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   migrate:
     build: .
     command: ["migrate"]
     environment:
       AIGW_ENVIRONMENT: local
+      AIGW_PERSISTENCE_BACKEND: postgres
       AIGW_DB_DSN: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
       AIGW_AUTH_API_KEY_PEPPER_REF: literal://local-dev-pepper-change-me
       AIGW_PROVIDER_ENABLED: '["echo"]'
@@ -63,16 +78,25 @@ services:
     build: .
     command: ["api"]
     ports:
-      - "8000:8000"
+      # Host 18000 avoids collisions with other local stacks bound to :8000.
+      - "18000:8000"
     environment:
       AIGW_ENVIRONMENT: local
+      AIGW_PERSISTENCE_BACKEND: postgres
       AIGW_DB_DSN: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
       AIGW_REDIS_URL: redis://redis:6379/0
       AIGW_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      AIGW_KAFKA_ENABLED: "false"
+      AIGW_KAFKA_ENABLED: "true"
       AIGW_AUTH_API_KEY_PEPPER_REF: literal://local-dev-pepper-change-me
       AIGW_AUTH_JWT_ENABLED: "false"
-      AIGW_PROVIDER_ENABLED: '["echo"]'
+      AIGW_PROVIDER_ENABLED: '["echo","openai","anthropic"]'
+      AIGW_PROVIDER_OPENAI_BASE_URL: http://provider-a:18001/v1
+      AIGW_PROVIDER_OPENAI_API_KEY_REF: literal://provider-a-secret
+      AIGW_PROVIDER_ANTHROPIC_BASE_URL: http://provider-b:18002/v1
+      AIGW_PROVIDER_ANTHROPIC_API_KEY_REF: literal://provider-b-secret
+      AIGW_PROVIDER_DEFAULT_MODEL: openai/gpt-4o-mini
+      AIGW_PROVIDER_SCENARIO_FORWARDING: "true"
+      AIGW_DEMO_API_KEY: aigw_local_demo_key_do_not_use_in_prod_001
       AIGW_OTEL_LOG_FORMAT: console
       AIGW_OTEL_LOG_LEVEL: INFO
       AIGW_DOCS_ENABLED: "true"
@@ -83,29 +107,85 @@ services:
         condition: service_healthy
       kafka:
         condition: service_started
+      provider-a:
+        condition: service_healthy
+      provider-b:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 15s
+      retries: 12
+      start_period: 20s
+
+  api-2:
+    build: .
+    command: ["api"]
+    profiles: ["ha"]
+    ports:
+      - "18003:8000"
+    environment:
+      AIGW_ENVIRONMENT: local
+      AIGW_PERSISTENCE_BACKEND: postgres
+      AIGW_DB_DSN: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
+      AIGW_REDIS_URL: redis://redis:6379/0
+      AIGW_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      AIGW_KAFKA_ENABLED: "true"
+      AIGW_AUTH_API_KEY_PEPPER_REF: literal://local-dev-pepper-change-me
+      AIGW_AUTH_JWT_ENABLED: "false"
+      AIGW_PROVIDER_ENABLED: '["echo","openai","anthropic"]'
+      AIGW_PROVIDER_OPENAI_BASE_URL: http://provider-a:18001/v1
+      AIGW_PROVIDER_OPENAI_API_KEY_REF: literal://provider-a-secret
+      AIGW_PROVIDER_ANTHROPIC_BASE_URL: http://provider-b:18002/v1
+      AIGW_PROVIDER_ANTHROPIC_API_KEY_REF: literal://provider-b-secret
+      AIGW_PROVIDER_DEFAULT_MODEL: openai/gpt-4o-mini
+      AIGW_PROVIDER_SCENARIO_FORWARDING: "true"
+      AIGW_DEMO_API_KEY: aigw_local_demo_key_do_not_use_in_prod_001
+      AIGW_OTEL_LOG_FORMAT: console
+      AIGW_OTEL_LOG_LEVEL: INFO
+      AIGW_DOCS_ENABLED: "true"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+      provider-a:
+        condition: service_healthy
+      provider-b:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   worker:
     build: .
     command: ["worker"]
     environment:
       AIGW_ENVIRONMENT: local
+      AIGW_PERSISTENCE_BACKEND: postgres
       AIGW_DB_DSN: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
       AIGW_REDIS_URL: redis://redis:6379/0
-      AIGW_KAFKA_ENABLED: "false"
+      AIGW_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      AIGW_KAFKA_ENABLED: "true"
       AIGW_AUTH_API_KEY_PEPPER_REF: literal://local-dev-pepper-change-me
-      AIGW_PROVIDER_ENABLED: '["echo"]'
+      AIGW_PROVIDER_ENABLED: '["echo","openai","anthropic"]'
+      AIGW_PROVIDER_OPENAI_BASE_URL: http://provider-a:18001/v1
+      AIGW_PROVIDER_OPENAI_API_KEY_REF: literal://provider-a-secret
+      AIGW_PROVIDER_ANTHROPIC_BASE_URL: http://provider-b:18002/v1
+      AIGW_PROVIDER_ANTHROPIC_API_KEY_REF: literal://provider-b-secret
       AIGW_OTEL_LOG_FORMAT: console
     depends_on:
       migrate:
         condition: service_completed_successfully
       api:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   postgres_data:

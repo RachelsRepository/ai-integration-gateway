@@ -24,6 +24,7 @@ from ai_gateway.application.use_cases.base import GatewayServices
 from ai_gateway.domain.entities.agent import (
     AgentDefinition,
     AgentRun,
+    AgentRunStatus,
     AgentStep,
     AgentStepType,
     ToolInvocation,
@@ -42,9 +43,12 @@ from ai_gateway.domain.errors import (
 from ai_gateway.domain.events import DomainEvent, EventType
 from ai_gateway.domain.policies.routing import RoutingDecision, RoutingStrategy
 from ai_gateway.domain.services.content_safety import RiskLevel
+from ai_gateway.domain.value_objects.identifiers import AgentRunId
 from ai_gateway.domain.value_objects.model import ModelCapability, ModelRef
 
 _TOOL_OUTPUT_LIMIT = 8_000
+_TOOL_ARGS_LIMIT = 8_000
+_MAX_TOOL_DEPTH = 8
 
 
 class RunAgentUseCase:
@@ -77,6 +81,9 @@ class RunAgentUseCase:
 
         definition = self._definition(command)
         run = AgentRun(tenant_id=context.tenant_id, definition=definition)
+        run.metadata["input"] = command.input
+        if command.metadata.get("pause_after_steps"):
+            run.metadata["pause_after_steps"] = str(command.metadata["pause_after_steps"])
         started = self._s.clock.monotonic()
 
         async with self._s.uow_factory() as uow:
@@ -86,6 +93,8 @@ class RunAgentUseCase:
             verdict = self._s.guardrails.screen_request(tuple(transcript), context.tenant)
             transcript = list(verdict.messages)
             run.start()
+            await uow.agent_runs.save(run)
+            await uow.commit()
 
             try:
                 await self._loop(uow, run, transcript, command, context)
@@ -101,16 +110,94 @@ class RunAgentUseCase:
                 )
                 raise
 
-            await self._finalise(
-                uow,
-                run,
-                context,
-                conversation=conversation,
-                transcript=transcript,
-                started=started,
-            )
-            await uow.commit()
+            if run.metadata.get("paused") == "true":
+                await uow.commit()
+            else:
+                await self._finalise(
+                    uow,
+                    run,
+                    context,
+                    conversation=conversation,
+                    transcript=transcript,
+                    started=started,
+                )
+                await uow.commit()
 
+        return AgentRunResult(
+            run_id=run.id,
+            request_id=context.request_id,
+            status=run.status,
+            output=run.output,
+            steps=tuple(run.steps),
+            usage=run.total_usage,
+            cost=run.total_cost,
+            latency_ms=int((self._s.clock.monotonic() - started) * 1000),
+            conversation_id=run.conversation_id,
+            error=run.error,
+        )
+
+    async def resume(self, run_id: str, context: RequestContext) -> AgentRunResult:
+        """Resume a durable agent run after a pause or process restart."""
+        context.principal.require(Permission.AGENTS_RUN)
+        context.tenant.assert_active()
+        started = self._s.clock.monotonic()
+        async with self._s.uow_factory() as uow:
+            run = await uow.agent_runs.get(AgentRunId(run_id), tenant_id=context.tenant_id)
+            if run is None:
+                raise NotFoundError("Agent run not found", details={"run_id": run_id})
+            if run.status not in {AgentRunStatus.RUNNING, AgentRunStatus.PENDING}:
+                raise AgentExecutionError(
+                    "Agent run is not resumable",
+                    details={"run_id": run_id, "status": run.status.value},
+                )
+            conversation = None
+            if run.conversation_id is not None:
+                conversation = await uow.conversations.get(
+                    run.conversation_id, tenant_id=context.tenant_id
+                )
+            command = AgentRunCommand(
+                input=run.metadata.get("input", ""),
+                agent_name=run.definition.name,
+                instructions=run.definition.instructions,
+                tools=run.definition.tools,
+                model=run.definition.model,
+                max_iterations=run.definition.max_iterations,
+                conversation_id=run.conversation_id,
+                metadata={k: v for k, v in run.metadata.items() if k != "pause_after_steps"},
+            )
+            transcript = self._seed_transcript(run.definition, command, conversation)
+            # Rebuild tool/assistant messages already recorded as steps.
+            for step in run.steps:
+                if step.content:
+                    transcript.append(Message.assistant(step.content))
+                for inv in step.tool_invocations:
+                    transcript.append(inv.to_message())
+            run.metadata.pop("paused", None)
+            try:
+                await self._loop(uow, run, transcript, command, context)
+            except DomainError as exc:
+                run.fail(exc.message, now=self._s.clock.now())
+                await self._finalise(
+                    uow,
+                    run,
+                    context,
+                    conversation=conversation,
+                    transcript=transcript,
+                    started=started,
+                )
+                raise
+            if run.metadata.get("paused") == "true":
+                await uow.commit()
+            else:
+                await self._finalise(
+                    uow,
+                    run,
+                    context,
+                    conversation=conversation,
+                    transcript=transcript,
+                    started=started,
+                )
+                await uow.commit()
         return AgentRunResult(
             run_id=run.id,
             request_id=context.request_id,
@@ -163,6 +250,8 @@ class RunAgentUseCase:
                 run.succeed(
                     self._s.guardrails.filter_output(response.content), now=self._s.clock.now()
                 )
+                await uow.agent_runs.save(run)
+                await uow.commit()
                 return
 
             transcript.append(response.message)
@@ -179,6 +268,16 @@ class RunAgentUseCase:
                 )
             )
             transcript.extend(invocation.to_message() for invocation in invocations)
+            # Durable mid-run checkpoint so a restarted worker/API can resume.
+            await uow.agent_runs.save(run)
+            await uow.commit()
+            pause_after = int(command.metadata.get("pause_after_steps", "0") or "0")
+            if pause_after > 0 and len(run.steps) >= pause_after:
+                run.metadata["paused"] = "true"
+                run.metadata["resume_transcript_len"] = str(len(transcript))
+                await uow.agent_runs.save(run)
+                await uow.commit()
+                return
 
         run.fail("Agent exhausted its iteration budget", now=self._s.clock.now())
         raise AgentExecutionError(
@@ -255,7 +354,7 @@ class RunAgentUseCase:
             )
         return invocations
 
-    async def _execute_tool(
+    async def _execute_tool(  # noqa: PLR0911
         self, run: AgentRun, call: ToolCall, context: RequestContext
     ) -> ToolInvocation:
         started = time.perf_counter()
@@ -270,6 +369,43 @@ class RunAgentUseCase:
             tool = self._s.tools.get(call.name)
         except ToolNotFoundError as exc:
             return ToolInvocation(call=call, output="", succeeded=False, error=exc.message)
+
+        if tool.definition.requires_confirmation and not run.metadata.get("tools_confirmed"):
+            return ToolInvocation(
+                call=call,
+                output="",
+                succeeded=False,
+                error=f"Tool {call.name!r} requires confirmation before execution",
+            )
+
+        # Constrained runner: reject oversized argument payloads and nested shell-like keys.
+        encoded_args = str(call.arguments)
+        if len(encoded_args) > _TOOL_ARGS_LIMIT:
+            return ToolInvocation(
+                call=call,
+                output="",
+                succeeded=False,
+                error="tool arguments exceed size limit",
+            )
+        forbidden = {"__import__", "eval", "exec", "subprocess", "os.system", "/bin/", "shell"}
+        lowered = encoded_args.lower()
+        if any(token in lowered for token in forbidden):
+            return ToolInvocation(
+                call=call,
+                output="",
+                succeeded=False,
+                error="tool arguments rejected by constrained execution policy",
+            )
+
+        depth = int(run.metadata.get("tool_depth", "0") or "0")
+        if depth >= _MAX_TOOL_DEPTH:
+            return ToolInvocation(
+                call=call,
+                output="",
+                succeeded=False,
+                error="recursive tool-call limit exceeded",
+            )
+        run.metadata["tool_depth"] = str(depth + 1)
 
         execution_context = ToolExecutionContext(
             tenant_id=context.tenant_id,

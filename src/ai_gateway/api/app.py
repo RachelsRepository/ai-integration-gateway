@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -11,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ai_gateway import __version__
 from ai_gateway.api.errors import install_exception_handlers
 from ai_gateway.api.middleware.correlation import CorrelationMiddleware
-from ai_gateway.api.routes import agents, catalog, chat, embeddings, health, prompts
+from ai_gateway.api.routes import admin, agents, catalog, chat, embeddings, health, prompts
 from ai_gateway.config.settings import Settings, get_settings
 from ai_gateway.container import build_container
 from ai_gateway.domain.entities.tenant import Role, Tenant
@@ -40,25 +41,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         hasher = container.authenticator._hasher
         if hasher is not None:
             tenant = Tenant(name="demo", id=TenantId("00000000-0000-4000-8000-000000000001"))
+            # Stable local key so Compose scripts survive API recreates.
+            plaintext_override = os.environ.get("AIGW_DEMO_API_KEY") or None
             plaintext, api_key = hasher.mint(
-                tenant_id=tenant.id, name="demo", roles=frozenset({Role.ADMIN})
+                tenant_id=tenant.id,
+                name="demo",
+                roles=frozenset({Role.ADMIN}),
+                plaintext=plaintext_override,
             )
             async with container.services.uow_factory() as uow:
                 existing = await uow.tenants.get(tenant.id)
                 if existing is None:
                     await uow.tenants.upsert(tenant)
+                # Avoid minting duplicate hashes on every restart when a stable key is set.
+                already = False
+                if plaintext_override:
+                    for key in await uow.api_keys.find_by_prefix(api_key.prefix):
+                        if key.hashed_secret == api_key.hashed_secret and key.revoked_at is None:
+                            already = True
+                            break
+                if not already:
                     await uow.api_keys.add(api_key)
-                    await uow.commit()
-                    # Local-only bootstrap aid. Printed outside structured logging so the
-                    # secret scrubber does not mask the one-time developer credential.
-                    print(
-                        f"LOCAL DEMO API KEY (never use outside local): {plaintext}",
-                        flush=True,
-                    )
-                    logger.info("demo_tenant_seeded", api_key_prefix=api_key.prefix)
-                    app.state.demo_api_key = plaintext
-                else:
-                    await uow.rollback()
+                await uow.commit()
+            # Local-only bootstrap aid. Printed outside structured logging so the
+            # secret scrubber does not mask the developer credential after restarts.
+            print(
+                f"LOCAL DEMO API KEY (never use outside local): {plaintext}",
+                flush=True,
+            )
+            logger.info("demo_tenant_seeded", api_key_prefix=api_key.prefix)
+            app.state.demo_api_key = plaintext
 
     logger.info(
         "gateway_started",
@@ -68,7 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await container.services.providers.aclose()
+        await container.aclose()
         shutdown_tracing()
         logger.info("gateway_stopped")
 
@@ -133,6 +145,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agents.router)
     app.include_router(prompts.router)
     app.include_router(catalog.router)
+    app.include_router(admin.router)
     return app
 
 

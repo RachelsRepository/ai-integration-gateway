@@ -231,6 +231,7 @@ class AnthropicProvider:
     def _headers(self, context: ProviderCallContext) -> dict[str, str]:
         headers = self._headers_bare()
         headers["X-Request-ID"] = str(context.request_id)
+        headers.update(context.extra_headers)
         return headers
 
     def _headers_bare(self) -> dict[str, str]:

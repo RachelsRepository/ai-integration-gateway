@@ -59,6 +59,7 @@ dev = [
   "types-redis>=4.6",
   "pre-commit>=3.7",
   "hypothesis>=6.100",
+  "aiosqlite>=0.20",
 ]
 
 [project.urls]
@@ -78,7 +79,7 @@ packages = ["src/ai_gateway"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-extend-exclude = ["migrations/versions"]
+extend-exclude = ["migrations/versions", "services"]
 
 [tool.ruff.lint]
 select = [
@@ -140,7 +141,7 @@ show_error_codes = true
 namespace_packages = true
 explicit_package_bases = true
 mypy_path = "src"
-exclude = "(^migrations/versions/)"
+exclude = "(^migrations/versions/|^services/)"
 
 [[tool.mypy.overrides]]
 module = [

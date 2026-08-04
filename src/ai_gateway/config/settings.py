@@ -31,6 +31,13 @@ class Environment(StrEnum):
         return self in {Environment.STAGING, Environment.PRODUCTION}
 
 
+class PersistenceBackend(StrEnum):
+    """Durable state backend used by the composition root."""
+
+    MEMORY = "memory"
+    POSTGRES = "postgres"
+
+
 class _Base(BaseSettings):
     """Base settings model with shared configuration."""
 
@@ -277,6 +284,7 @@ class Settings(_Base):
     )
 
     environment: Environment = Environment.LOCAL
+    persistence_backend: PersistenceBackend = PersistenceBackend.MEMORY
     service_name: str = "ai-integration-gateway"
     version: str = "1.0.0"
     region: str = "us-east-1"
@@ -287,6 +295,8 @@ class Settings(_Base):
     docs_enabled: bool = True
     default_tenant_rate_limit_per_minute: Annotated[int, Field(ge=1)] = 600
     admin_bootstrap_token: SecretStr | None = None
+    # Forward X-Scenario to fictional providers for local/automated verification only.
+    provider_scenario_forwarding: bool = False
 
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
@@ -314,6 +324,12 @@ class Settings(_Base):
             raise ValueError("debug must be disabled outside development")
         if self.docs_enabled:
             raise ValueError("OpenAPI documentation must be disabled in production")
+        if self.provider_scenario_forwarding:
+            raise ValueError("provider scenario forwarding is not permitted in production")
+        if self.persistence_backend is PersistenceBackend.MEMORY:
+            raise ValueError("memory persistence is not permitted in production")
+        if not self.kafka.enabled:
+            raise ValueError("Kafka must be enabled in production-like environments")
         if not self.auth.jwt_enabled and not self.auth.api_keys_enabled:
             raise ValueError("At least one authentication method must be enabled")
         if self.auth.jwt_enabled and not self.auth.jwks_url and not self.auth.jwt_shared_secret_ref:
@@ -350,6 +366,7 @@ __all__ = [
     "Environment",
     "KafkaSettings",
     "ObservabilitySettings",
+    "PersistenceBackend",
     "ProviderSettings",
     "RedisSettings",
     "ResilienceSettings",

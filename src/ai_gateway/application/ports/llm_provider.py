@@ -44,6 +44,7 @@ class ProviderCallContext:
         attempt: One-based attempt counter for retried calls.
         idempotency_key: Key forwarded to providers that support idempotent retries.
         trace_id: Distributed trace identifier for upstream correlation.
+        extra_headers: Optional headers (e.g. local ``X-Scenario``); never secrets.
     """
 
     request_id: RequestId
@@ -52,6 +53,7 @@ class ProviderCallContext:
     attempt: int = 1
     idempotency_key: str | None = None
     trace_id: str | None = None
+    extra_headers: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

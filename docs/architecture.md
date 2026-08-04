@@ -46,12 +46,17 @@ Echo provider is always available for local development and contract tests.
   repository ports (used for local development and the automated test suite). Production
   deployments should replace that factory with a SQLAlchemy-backed unit of work against
   the migrated schema.
-- Redis adapters provide response/embedding caches, rate-limit counters and distributed
-  locks; local mode may substitute the in-memory cache.
+- Redis adapters provide response/embedding caches, rate-limit counters, shared quota
+  reservations, and distributed circuit-breaker state; local memory mode substitutes an
+  in-memory cache and process-local breakers.
+- Compose postgres mode uses a SQLAlchemy unit of work, Redis circuit breakers, a Redis
+  reservation ledger, and a PostgreSQL-backed DLQ. Local admin helpers under `/v1/admin`
+  exist only when `environment=local` for multi-replica verification and DLQ re-drive.
 
 ## Events
 
 Domain events are written to the outbox in the same transaction as business writes. A
 background relay publishes unpublished rows and moves exhausted failures to a dead-letter
 queue. A Kafka publisher adapter is provided; the default local composition uses an
-in-memory publisher so the stack runs without a broker.
+in-memory publisher so the stack runs without a broker. Production-like settings require
+Kafka enabled and reject memory persistence and scenario forwarding.

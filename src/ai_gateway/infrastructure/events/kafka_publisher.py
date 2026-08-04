@@ -7,6 +7,7 @@ callers can decide whether to fall back to the outbox.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -47,19 +48,43 @@ class KafkaEventPublisher:
         self._producer: Any = None
 
     async def start(self) -> None:
-        """Start the underlying producer."""
+        """Start the underlying producer with bounded retries."""
         if not self._enabled:
             return
         from aiokafka import AIOKafkaProducer
 
-        self._producer = AIOKafkaProducer(
-            bootstrap_servers=self._bootstrap,
-            client_id=self._client_id,
-            acks="all",
-            **self._producer_kwargs,
-        )
-        await self._producer.start()
-        logger.info("kafka_publisher_started", bootstrap=self._bootstrap)
+        last_error: Exception | None = None
+        for attempt in range(1, 9):
+            producer = AIOKafkaProducer(
+                bootstrap_servers=self._bootstrap,
+                client_id=self._client_id,
+                acks="all",
+                **self._producer_kwargs,
+            )
+            self._producer = producer
+            try:
+                await producer.start()
+                logger.info(
+                    "kafka_publisher_started",
+                    bootstrap=self._bootstrap,
+                    attempt=attempt,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "kafka_publisher_start_retry",
+                    bootstrap=self._bootstrap,
+                    attempt=attempt,
+                    error=str(exc),
+                )
+                try:
+                    await producer.stop()
+                except Exception as stop_exc:
+                    logger.debug("kafka_publisher_stop_failed", error=str(stop_exc))
+                self._producer = None
+                await asyncio.sleep(min(2 ** (attempt - 1), 10))
+        raise DomainError(f"Kafka publisher failed to start: {last_error}")
 
     async def stop(self) -> None:
         """Flush and stop the underlying producer."""

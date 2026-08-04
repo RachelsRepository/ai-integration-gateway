@@ -7,6 +7,7 @@ from ai_gateway.application.ports.clock import Clock
 from ai_gateway.application.ports.metrics import MetricsRecorder
 from ai_gateway.application.ports.rate_limiter import RateLimiter
 from ai_gateway.application.ports.repositories import UnitOfWork
+from ai_gateway.application.services.quota_ledger import QuotaReservation, QuotaReservationLedger
 from ai_gateway.domain.entities.tenant import QuotaPeriod, Tenant
 from ai_gateway.domain.entities.usage import OperationType, UsageRecord
 from ai_gateway.domain.events import DomainEvent, EventType
@@ -28,32 +29,18 @@ class UsageMeter:
         clock: Clock,
         metrics: MetricsRecorder,
         quota_evaluator: QuotaEvaluator | None = None,
+        reservation_ledger: QuotaReservationLedger | None = None,
     ) -> None:
-        """Initialise the meter.
-
-        Args:
-            rate_limiter: Distributed rate limiter.
-            cost_calculator: Price book backed cost calculator.
-            clock: Injected clock.
-            metrics: Metrics sink.
-            quota_evaluator: Quota policy evaluator.
-        """
+        """Initialise the meter."""
         self._rate_limiter = rate_limiter
         self._costs = cost_calculator
         self._clock = clock
         self._metrics = metrics
         self._quotas = quota_evaluator or QuotaEvaluator()
+        self._ledger = reservation_ledger
 
     async def enforce_rate_limit(self, tenant: Tenant, *, cost: int = 1) -> None:
-        """Consume rate-limit capacity for a tenant.
-
-        Args:
-            tenant: Tenant issuing the request.
-            cost: Tokens consumed from the bucket.
-
-        Raises:
-            RateLimitExceededError: If the tenant is over its configured rate.
-        """
+        """Consume rate-limit capacity for a tenant."""
         decision = await self._rate_limiter.acquire(
             f"tenant:{tenant.id}",
             limit_per_minute=tenant.rate_limit_per_minute,
@@ -77,20 +64,7 @@ class UsageMeter:
         projected_tokens: int,
         projected_cost: Money,
     ) -> QuotaDecision:
-        """Check the tenant's remaining daily and monthly allowance.
-
-        Args:
-            uow: Open unit of work supplying the usage snapshot.
-            tenant: Tenant issuing the request.
-            projected_tokens: Tokens the request is expected to consume.
-            projected_cost: Spend the request is expected to incur.
-
-        Returns:
-            The quota decision when the request is permitted.
-
-        Raises:
-            QuotaExceededError: If a quota or budget is exhausted.
-        """
+        """Check the tenant's remaining daily and monthly allowance (durable snapshot)."""
         snapshots = await uow.usage.snapshot(tenant.id, at=self._clock.now())
         decision = self._quotas.evaluate(
             tenant,
@@ -121,29 +95,64 @@ class UsageMeter:
             decision.raise_if_denied()
         return decision
 
+    async def reserve(
+        self,
+        tenant: Tenant,
+        *,
+        reservation_id: str,
+        projected_tokens: int,
+        projected_cost: Money,
+        model: ModelRef | None = None,
+        concurrency_limit: int | None = None,
+    ) -> QuotaReservation | None:
+        """Atomically reserve shared quota capacity across replicas."""
+        if self._ledger is None:
+            return None
+        reservation = await self._ledger.reserve(
+            tenant,
+            reservation_id=reservation_id,
+            projected_tokens=projected_tokens,
+            projected_cost=projected_cost,
+            concurrency_limit=concurrency_limit,
+            model=model.qualified if model else None,
+            provider=model.provider if model else None,
+        )
+        self._metrics.increment(
+            "gateway_quota_reservations_total",
+            labels={"tenant": str(tenant.id), "result": "reserved"},
+        )
+        return reservation
+
+    async def settle_reservation(
+        self,
+        reservation: QuotaReservation | None,
+        *,
+        actual_tokens: int,
+        actual_cost: Money,
+    ) -> None:
+        """Settle a reservation to actual usage."""
+        if reservation is None or self._ledger is None:
+            return
+        await self._ledger.settle(
+            reservation, actual_tokens=actual_tokens, actual_cost=actual_cost
+        )
+
+    async def release_reservation(self, reservation: QuotaReservation | None) -> None:
+        """Release a reservation after failure or cancellation."""
+        if reservation is None or self._ledger is None:
+            return
+        await self._ledger.release(reservation)
+        self._metrics.increment(
+            "gateway_quota_reservations_total",
+            labels={"tenant": str(reservation.tenant_id), "result": "released"},
+        )
+
     def price(self, model: ModelRef, usage: TokenUsage) -> Money:
-        """Compute the billable cost of a completed call.
-
-        Args:
-            model: Model that served the call.
-            usage: Token counters reported by the provider.
-
-        Returns:
-            The billable cost.
-        """
+        """Compute the billable cost of a completed call."""
         return self._costs.calculate(model, usage)
 
     def project(self, model: ModelRef, *, prompt_tokens: int, max_output_tokens: int) -> Money:
-        """Project the worst-case cost of a call before dispatch.
-
-        Args:
-            model: Candidate model.
-            prompt_tokens: Estimated prompt size.
-            max_output_tokens: Requested completion budget.
-
-        Returns:
-            The projected cost.
-        """
+        """Project the worst-case cost of a call before dispatch."""
         return self._costs.estimate(
             model, prompt_tokens=prompt_tokens, max_output_tokens=max_output_tokens
         )
@@ -162,25 +171,12 @@ class UsageMeter:
         cached: bool = False,
         attempt: int = 1,
         metadata: dict[str, str] | None = None,
+        estimated: bool = False,
     ) -> UsageRecord:
-        """Persist a usage record and stage the corresponding event.
-
-        Args:
-            uow: Open unit of work.
-            context: Request context supplying tenant and correlation identifiers.
-            operation: Billable operation type.
-            model: Model that served the request.
-            usage: Token counters.
-            cost: Billable cost.
-            latency_ms: End-to-end latency.
-            succeeded: Whether the upstream call succeeded.
-            cached: Whether the response was served from cache.
-            attempt: Attempt number for retried requests.
-            metadata: Additional annotations.
-
-        Returns:
-            The persisted usage record.
-        """
+        """Persist a usage record and stage the corresponding event."""
+        meta = dict(metadata or {})
+        if estimated:
+            meta.setdefault("usage_source", "estimated")
         record = UsageRecord(
             tenant_id=context.tenant_id,
             request_id=context.request_id,
@@ -195,7 +191,7 @@ class UsageMeter:
             succeeded=succeeded,
             cached=cached,
             attempt=attempt,
-            metadata=metadata or {},
+            metadata=meta,
         )
         await uow.usage.record(record)
         await uow.outbox.enqueue(
@@ -215,6 +211,7 @@ class UsageMeter:
                     "latency_ms": latency_ms,
                     "succeeded": succeeded,
                     "cached": cached,
+                    "estimated": estimated,
                 },
             )
         )
@@ -241,14 +238,7 @@ class UsageMeter:
 
 
 def empty_snapshot(period: QuotaPeriod) -> UsageSnapshot:
-    """Return a zeroed snapshot for a period.
-
-    Args:
-        period: Enforcement window.
-
-    Returns:
-        A snapshot with no recorded consumption.
-    """
+    """Return a zeroed snapshot for a period."""
     return UsageSnapshot(period=period)
 
 

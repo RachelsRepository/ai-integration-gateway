@@ -193,11 +193,13 @@ class AzureOpenAIProvider:
         return payload
 
     def _headers(self, context: ProviderCallContext) -> dict[str, str]:
-        return {
+        headers = {
             "api-key": self._api_key,
             "Content-Type": "application/json",
             "X-Request-ID": str(context.request_id),
         }
+        headers.update(context.extra_headers)
+        return headers
 
     async def _post(
         self, url: str, payload: dict[str, Any], context: ProviderCallContext

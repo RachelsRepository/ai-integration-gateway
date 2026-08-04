@@ -1,4 +1,4 @@
-.PHONY: help install lint format typecheck test coverage architecture openapi run worker migrate docker-up docker-down terraform-fmt terraform-validate verify
+.PHONY: help install lint format typecheck test coverage architecture openapi run worker migrate docker-up docker-down terraform-fmt terraform-validate verify verify-runtime
 
 PYTHON ?= .venv/bin/python
 PIP ?= .venv/bin/pip
@@ -8,7 +8,7 @@ MYPY ?= .venv/bin/mypy
 LINT_IMPORTS ?= .venv/bin/lint-imports
 
 help:
-	@echo "Targets: install lint format typecheck test coverage architecture openapi run worker migrate docker-up docker-down verify"
+	@echo "Targets: install lint format typecheck test coverage architecture openapi run worker migrate docker-up docker-down verify verify-runtime"
 
 install:
 	python3.11 -m venv .venv
@@ -48,10 +48,10 @@ migrate:
 	PYTHONPATH=src $(PYTHON) -m alembic upgrade head
 
 docker-up:
-	docker compose up --build -d
+	docker compose --profile ha up --build -d
 
 docker-down:
-	docker compose down -v
+	docker compose --profile ha down -v --remove-orphans
 
 terraform-fmt:
 	cd deploy/terraform && terraform fmt -check -recursive
@@ -61,3 +61,26 @@ terraform-validate:
 
 verify: lint typecheck architecture coverage openapi
 	@echo "Verification complete"
+
+verify-runtime:
+	chmod +x scripts/*.sh
+	docker compose --profile ha up --build -d
+	REQUIRE_HA=1 AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+		API_BASE=http://127.0.0.1:18000 API_BASE_B=http://127.0.0.1:18003 \
+		scripts/wait_for_stack.sh
+	AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 API_BASE=http://127.0.0.1:18000 \
+		scripts/e2e_compose.sh
+	AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 API_BASE=http://127.0.0.1:18000 \
+		scripts/recreate_embeddings_compose.sh
+	AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 \
+		API_BASE_A=http://127.0.0.1:18000 API_BASE_B=http://127.0.0.1:18003 \
+		scripts/ha_quota_compose.sh
+	AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 API_BASE=http://127.0.0.1:18000 \
+		scripts/provider_matrix_compose.sh
+	AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 API_BASE=http://127.0.0.1:18000 \
+		scripts/agent_resume_compose.sh
+	AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 API_BASE=http://127.0.0.1:18000 \
+		scripts/chaos_compose.sh
+	AIGW_API_KEY=aigw_local_demo_key_do_not_use_in_prod_001 API_BASE=http://127.0.0.1:18000 \
+		LOAD_CONCURRENCY=4 LOAD_REQUESTS=20 scripts/load_compose.sh
+	@echo "Runtime verification complete"

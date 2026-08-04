@@ -54,6 +54,7 @@ class RequestContext:
     trace_id: str | None = None
     idempotency_key: str | None = None
     deadline_seconds: float = 60.0
+    provider_scenario: str | None = None
 
     @property
     def tenant_id(self) -> TenantId:
