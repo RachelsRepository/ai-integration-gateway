@@ -187,5 +187,28 @@ services:
       api:
         condition: service_healthy
 
+  # Dedicated non-runtime image with pytest/dev deps baked in at build time.
+  # Does not mutate /opt/venv at container start.
+  integration:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    working_dir: /app
+    environment:
+      AIGW_TEST_DB_DSN: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
+      PYTHONPATH: /app/src
+      PYTEST_ADDOPTS: "-p no:cacheprovider"
+    volumes:
+      - ./tests:/app/tests:ro
+      - ./src:/app/src:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["pytest", "tests/integration", "-q", "--tb=short"]
+
 volumes:
   postgres_data:

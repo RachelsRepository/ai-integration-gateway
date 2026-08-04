@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
-
-from redis.asyncio import Redis
+from typing import Protocol, runtime_checkable
 
 from ai_gateway.application.ports.resilience import CircuitSnapshot, CircuitState
 from ai_gateway.infrastructure.resilience.circuit_breaker import InMemoryCircuitBreaker
@@ -73,13 +71,55 @@ redis.call('EXPIRE', key, math.max(math.floor(reset_timeout * 4), 120))
 return {state, failures, successes, opened_at, 1}
 """
 
+_SCRIPT_RESULT_LEN = 5
+
+
+@runtime_checkable
+class CircuitBreakerRedisClient(Protocol):
+    """Minimal async Redis surface used by distributed circuit breakers."""
+
+    async def eval(
+        self,
+        script: str,
+        numkeys: int,
+        *keys_and_args: str | bytes | int | float,
+    ) -> object:
+        """Evaluate a Lua script against Redis."""
+
+    async def hgetall(self, name: str | bytes) -> dict[bytes, bytes]:
+        """Return all fields in a hash key."""
+
+
+def _as_int(value: object, *, field: str) -> int:
+    """Parse Redis script numeric fields without treating arbitrary objects as int."""
+    if isinstance(value, bool):
+        raise TypeError(f"circuit field {field} must be numeric, got bool")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        return int(value)
+    raise TypeError(f"circuit field {field} must be int-compatible, got {type(value).__name__}")
+
+
+def _as_float(value: object, *, field: str) -> float:
+    """Parse Redis script float fields without treating arbitrary objects as float."""
+    if isinstance(value, bool):
+        raise TypeError(f"circuit field {field} must be numeric, got bool")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        return float(value)
+    raise TypeError(f"circuit field {field} must be float-compatible, got {type(value).__name__}")
+
 
 class RedisCircuitBreaker:
     """Circuit breaker whose state lives in Redis."""
 
     def __init__(
         self,
-        client: Redis,  # type: ignore[type-arg]
+        client: CircuitBreakerRedisClient,
         name: str,
         *,
         failure_threshold: int,
@@ -105,7 +145,7 @@ class RedisCircuitBreaker:
 
     async def _eval(self, action: str) -> tuple[CircuitState, int, int, float | None, bool]:
         try:
-            result = await self._client.eval(  # type: ignore[no-untyped-call]
+            result = await self._client.eval(
                 _TRANSITION_SCRIPT,
                 1,
                 self._key,
@@ -140,15 +180,17 @@ class RedisCircuitBreaker:
                 True,
             )
 
+        if not isinstance(result, (list, tuple)) or len(result) < _SCRIPT_RESULT_LEN:
+            raise TypeError(f"unexpected circuit script result: {result!r}")
         state_raw = result[0]
         if isinstance(state_raw, bytes):
             state_raw = state_raw.decode()
         state = CircuitState(str(state_raw))
-        failures = int(result[1])
-        successes = int(result[2])
-        opened_raw = float(result[3])
+        failures = _as_int(result[1], field="failures")
+        successes = _as_int(result[2], field="successes")
+        opened_raw = _as_float(result[3], field="opened_at")
         opened_at = opened_raw if opened_raw > 0 else None
-        allowed = bool(int(result[4]))
+        allowed = bool(_as_int(result[4], field="allowed"))
         return state, failures, successes, opened_at, allowed
 
     async def allows_request(self) -> bool:
@@ -173,13 +215,15 @@ class RedisCircuitBreaker:
     async def refresh_snapshot(self) -> CircuitSnapshot:
         """Load the shared Redis state into a snapshot."""
         try:
-            data: dict[Any, Any] = await self._client.hgetall(self._key)
+            data = await self._client.hgetall(self._key)
         except Exception:
             return self._local.snapshot()
         if not data:
             return CircuitSnapshot(name=self.name, state=CircuitState.CLOSED)
         decode = {
-            (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+            (k.decode() if isinstance(k, bytes) else str(k)): (
+                v.decode() if isinstance(v, bytes) else str(v)
+            )
             for k, v in data.items()
         }
         opened_raw = float(decode.get("opened_at", "0") or 0)
@@ -197,7 +241,7 @@ class RedisCircuitBreakerRegistry:
 
     def __init__(
         self,
-        client: Redis,  # type: ignore[type-arg]
+        client: CircuitBreakerRedisClient,
         *,
         failure_threshold: int = 5,
         success_threshold: int = 2,
@@ -232,4 +276,8 @@ class RedisCircuitBreakerRegistry:
         return {name: breaker.snapshot() for name, breaker in self._breakers.items()}
 
 
-__all__ = ["RedisCircuitBreaker", "RedisCircuitBreakerRegistry"]
+__all__ = [
+    "CircuitBreakerRedisClient",
+    "RedisCircuitBreaker",
+    "RedisCircuitBreakerRegistry",
+]

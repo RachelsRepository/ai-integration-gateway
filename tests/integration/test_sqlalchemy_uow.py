@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -20,7 +21,10 @@ from ai_gateway.domain.value_objects.tokens import TokenUsage
 from ai_gateway.infrastructure.persistence.models import Base
 from ai_gateway.infrastructure.persistence.sqlalchemy import SqlAlchemyUnitOfWork
 
-TENANT_ID = TenantId("22222222-2222-4222-8222-222222222222")
+
+def _unique_tenant_id() -> TenantId:
+    """Allocate a fresh tenant id so shared Postgres runs stay isolated."""
+    return TenantId(str(uuid.uuid4()))
 
 
 @pytest.fixture
@@ -54,10 +58,11 @@ async def test_sqlalchemy_uow_tenant_api_key_fk_order(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Tenant rows must exist before API keys (FK) even when flushed together."""
-    tenant = Tenant(name="fk-order", id=TENANT_ID)
+    tenant = Tenant(name="fk-order", id=_unique_tenant_id())
+    prefix = f"sk-fk-{uuid.uuid4().hex[:8]}"
     api_key = ApiKey(
         tenant_id=tenant.id,
-        prefix="sk-fk",
+        prefix=prefix,
         hashed_secret="hashed-secret",
         roles=frozenset({Role.SERVICE}),
     )
@@ -68,7 +73,7 @@ async def test_sqlalchemy_uow_tenant_api_key_fk_order(
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         assert await uow.tenants.get(tenant.id) is not None
-        assert len(await uow.api_keys.find_by_prefix("sk-fk")) == 1
+        assert len(await uow.api_keys.find_by_prefix(prefix)) == 1
         await uow.rollback()
 
 
@@ -77,16 +82,18 @@ async def test_sqlalchemy_uow_round_trip(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Persist and read back core aggregates through separate units of work."""
-    tenant = Tenant(name="sql-test", id=TENANT_ID)
+    tenant = Tenant(name="sql-test", id=_unique_tenant_id())
+    prefix = f"sk-test-{uuid.uuid4().hex[:8]}"
+    request_id = f"req-sql-{uuid.uuid4().hex[:12]}"
     api_key = ApiKey(
         tenant_id=tenant.id,
-        prefix="sk-test",
+        prefix=prefix,
         hashed_secret="hashed-secret",
         roles=frozenset({Role.SERVICE}),
     )
     usage = UsageRecord(
         tenant_id=tenant.id,
-        request_id=RequestId("req-sql-1"),
+        request_id=RequestId(request_id),
         operation=OperationType.CHAT,
         model=ModelRef(provider=ProviderName.ECHO, name="echo-1"),
         usage=TokenUsage(prompt_tokens=12, completion_tokens=8),
@@ -97,7 +104,7 @@ async def test_sqlalchemy_uow_round_trip(
     event = DomainEvent(
         type=EventType.USAGE_RECORDED,
         tenant_id=tenant.id,
-        payload={"request_id": "req-sql-1"},
+        payload={"request_id": request_id},
     )
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
@@ -111,18 +118,21 @@ async def test_sqlalchemy_uow_round_trip(
         loaded = await uow.tenants.get(tenant.id)
         assert loaded is not None
         assert loaded.name == "sql-test"
-        keys = await uow.api_keys.find_by_prefix("sk-test")
+        keys = await uow.api_keys.find_by_prefix(prefix)
         assert len(keys) == 1
         snap = await uow.usage.snapshot(tenant.id, at=datetime.now(UTC))
         assert QuotaPeriod.DAILY in snap
         assert snap[QuotaPeriod.DAILY].tokens == 20
         pending = await uow.outbox.fetch_unpublished(limit=10)
-        assert len(pending) == 1
-        outbox_id, loaded_event = pending[0]
+        # Filter to this tenant — shared Postgres may retain other unpublished rows.
+        mine = [item for item in pending if item[1].tenant_id == tenant.id]
+        assert len(mine) == 1
+        outbox_id, loaded_event = mine[0]
         assert loaded_event.type is EventType.USAGE_RECORDED
         await uow.outbox.mark_published([outbox_id], at=datetime.now(UTC))
         await uow.commit()
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
-        assert await uow.outbox.fetch_unpublished(limit=10) == []
+        pending = await uow.outbox.fetch_unpublished(limit=50)
+        assert all(event.tenant_id != tenant.id for _, event in pending)
         await uow.rollback()

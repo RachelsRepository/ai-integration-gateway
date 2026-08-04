@@ -159,7 +159,8 @@ class RunAgentUseCase:
                 input=run.metadata.get("input", ""),
                 agent_name=run.definition.name,
                 instructions=run.definition.instructions,
-                tools=run.definition.tools,
+                # frozenset → sorted tuple keeps resume tool order deterministic
+                tools=tuple(sorted(run.definition.tools)),
                 model=run.definition.model,
                 max_iterations=run.definition.max_iterations,
                 conversation_id=run.conversation_id,

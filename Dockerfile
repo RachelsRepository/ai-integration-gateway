@@ -22,6 +22,26 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
     && /opt/venv/bin/pip install .
 
+# Test image: install locked optional test/dev deps at build time into the venv.
+# Runtime containers never pip-install into /opt/venv.
+FROM builder AS test
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH=/app/src
+
+RUN /opt/venv/bin/pip install ".[dev]"
+
+RUN groupadd --system gateway \
+    && useradd --system --gid gateway --home /app --shell /usr/sbin/nologin gateway \
+    && mkdir -p /app \
+    && chown -R gateway:gateway /app
+
+WORKDIR /app
+USER gateway
+
+# Default command for compose `integration` service; CI mounts live sources under /app.
+CMD ["pytest", "tests/integration", "-q", "--tb=short"]
+
 FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

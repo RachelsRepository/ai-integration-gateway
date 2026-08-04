@@ -95,12 +95,9 @@ jobs:
 
       - name: Integration (SQLAlchemy UoW)
         run: |
-          docker compose run --rm --entrypoint "" \
+          docker compose --profile test run --rm --no-deps \
             -e AIGW_TEST_DB_DSN=postgresql+asyncpg://gateway:gateway@postgres:5432/gateway \
-            -v "$PWD/tests:/tests:ro" \
-            -v "$PWD/src:/src:ro" \
-            api \
-            sh -c 'pip install -q pytest pytest-asyncio aiosqlite && PYTHONPATH=/src pytest /tests/integration -q --tb=short'
+            integration
 
       - name: Compose e2e
         run: |

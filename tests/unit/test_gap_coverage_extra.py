@@ -20,6 +20,30 @@ from ai_gateway.infrastructure.resilience.redis_circuit_breaker import (
     RedisCircuitBreakerRegistry,
 )
 
+_RedisArg = str | bytes | int | float
+
+
+def _require_float(value: object, *, label: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{label} must be numeric, got bool")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        return float(value)
+    raise TypeError(f"{label} must be float-compatible, got {type(value).__name__}: {value!r}")
+
+
+def _require_int(value: object, *, label: str) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{label} must be numeric, got bool")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        return int(value)
+    raise TypeError(f"{label} must be int-compatible, got {type(value).__name__}: {value!r}")
+
 
 class _FakeRedis:
     """Minimal Redis stand-in returning bytes like redis-py."""
@@ -27,14 +51,14 @@ class _FakeRedis:
     def __init__(self) -> None:
         self._hashes: dict[str, dict[str, str]] = {}
 
-    async def eval(self, script: str, numkeys: int, *args: object) -> list[object]:
+    async def eval(self, script: str, numkeys: int, *args: _RedisArg) -> list[object]:
         del script, numkeys
         key = str(args[0])
         action = str(args[1])
-        now = float(args[2])
-        failure_threshold = int(args[3])
-        success_threshold = int(args[4])
-        reset_timeout = float(args[5])
+        now = _require_float(args[2], label="now")
+        failure_threshold = _require_int(args[3], label="failure_threshold")
+        success_threshold = _require_int(args[4], label="success_threshold")
+        reset_timeout = _require_float(args[5], label="reset_timeout")
         state = self._hashes.setdefault(key, {}).get("state", "closed")
         failures = int(self._hashes[key].get("failures", "0"))
         successes = int(self._hashes[key].get("successes", "0"))
@@ -77,7 +101,8 @@ class _FakeRedis:
         }
         return [state.encode(), failures, successes, opened_at, 1]
 
-    async def hgetall(self, key: str) -> dict[bytes, bytes]:
+    async def hgetall(self, name: str | bytes) -> dict[bytes, bytes]:
+        key = name.decode() if isinstance(name, bytes) else name
         data = self._hashes.get(key, {})
         return {k.encode(): v.encode() for k, v in data.items()}
 
@@ -85,7 +110,7 @@ class _FakeRedis:
 @pytest.mark.asyncio
 async def test_redis_circuit_decodes_bytes_state() -> None:
     registry = RedisCircuitBreakerRegistry(
-        _FakeRedis(),  # type: ignore[arg-type]
+        _FakeRedis(),
         failure_threshold=2,
         success_threshold=1,
         reset_timeout_seconds=30,
@@ -98,6 +123,46 @@ async def test_redis_circuit_decodes_bytes_state() -> None:
     snap = await breaker.refresh_snapshot()
     assert snap.state is CircuitState.OPEN
     assert registry.snapshots()["openai"].name == "openai"
+
+
+def test_require_numeric_helpers_reject_invalid_types() -> None:
+    with pytest.raises(TypeError, match="now must be float-compatible"):
+        _require_float(object(), label="now")
+    with pytest.raises(TypeError, match="failure_threshold must be int-compatible"):
+        _require_int([], label="failure_threshold")
+    with pytest.raises(TypeError, match="got bool"):
+        _require_int(True, label="flag")
+
+
+def test_circuit_breaker_numeric_parsers() -> None:
+    from ai_gateway.infrastructure.resilience.redis_circuit_breaker import _as_float, _as_int
+
+    assert _as_int(3, field="failures") == 3
+    assert _as_int(3.9, field="failures") == 3
+    assert _as_int(b"4", field="failures") == 4
+    assert _as_float("1.5", field="opened_at") == 1.5
+    with pytest.raises(TypeError, match="must be numeric, got bool"):
+        _as_int(True, field="failures")
+    with pytest.raises(TypeError, match="must be float-compatible"):
+        _as_float(object(), field="opened_at")
+    with pytest.raises(TypeError, match="must be int-compatible"):
+        _as_int([], field="failures")
+
+
+@pytest.mark.asyncio
+async def test_redis_circuit_rejects_malformed_script_result() -> None:
+    class _BadRedis:
+        async def eval(self, script: str, numkeys: int, *args: _RedisArg) -> object:
+            del script, numkeys, args
+            return ["closed"]
+
+        async def hgetall(self, name: str | bytes) -> dict[bytes, bytes]:
+            del name
+            return {}
+
+    registry = RedisCircuitBreakerRegistry(_BadRedis())
+    with pytest.raises(TypeError, match="unexpected circuit script result"):
+        await registry.get("x").allows_request()
 
 
 @pytest.mark.asyncio
@@ -352,7 +417,7 @@ async def test_agent_pause_metadata_roundtrip(services, tenant, principal) -> No
             input="say hi",
             agent_name="pause",
             instructions="Reply briefly without tools.",
-            tools=[],
+            tools=(),
             model="echo/echo-1",
             max_iterations=2,
             metadata={"pause_after_steps": "1"},

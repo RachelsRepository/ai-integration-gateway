@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from ai_gateway.application.services.metering import UsageMeter
@@ -22,19 +20,43 @@ from ai_gateway.infrastructure.rate_limiting.token_bucket import TokenBucketRate
 from ai_gateway.infrastructure.resilience.redis_circuit_breaker import RedisCircuitBreakerRegistry
 from ai_gateway.observability.metrics import NullMetrics
 
+_RedisArg = str | bytes | int | float
+
+
+def _require_float(value: object, *, label: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{label} must be numeric, got bool")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        return float(value)
+    raise TypeError(f"{label} must be float-compatible, got {type(value).__name__}: {value!r}")
+
+
+def _require_int(value: object, *, label: str) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{label} must be numeric, got bool")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        return int(value)
+    raise TypeError(f"{label} must be int-compatible, got {type(value).__name__}: {value!r}")
+
 
 class _FakeRedis:
     def __init__(self) -> None:
         self._hashes: dict[str, dict[str, str]] = {}
 
-    async def eval(self, script: str, numkeys: int, *args: Any) -> list[Any]:
+    async def eval(self, script: str, numkeys: int, *args: _RedisArg) -> list[object]:
         del script, numkeys
         key = str(args[0])
         action = str(args[1])
-        now = float(args[2])
-        failure_threshold = int(args[3])
-        success_threshold = int(args[4])
-        reset_timeout = float(args[5])
+        now = _require_float(args[2], label="now")
+        failure_threshold = _require_int(args[3], label="failure_threshold")
+        success_threshold = _require_int(args[4], label="success_threshold")
+        reset_timeout = _require_float(args[5], label="reset_timeout")
         state = self._hashes.setdefault(
             key, {"state": "closed", "failures": "0", "successes": "0", "opened_at": "0"}
         )
@@ -76,7 +98,8 @@ class _FakeRedis:
         )
         return [cur, failures, successes, opened_at, 1]
 
-    async def hgetall(self, key: str) -> dict[bytes, bytes]:
+    async def hgetall(self, name: str | bytes) -> dict[bytes, bytes]:
+        key = name.decode() if isinstance(name, bytes) else name
         data = self._hashes.get(key, {})
         return {k.encode(): v.encode() for k, v in data.items()}
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -41,38 +42,44 @@ async def test_sql_dlq_put_claim_resolve(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     dlq = SqlDeadLetterQueue(session_factory)
+    record_id = f"dlq-int-{uuid.uuid4().hex[:12]}"
     record = DeadLetterRecord(
-        id="dlq-int-1",
+        id=record_id,
         kind="event_publish",
         payload={"topic": "usage.recorded"},
         error="timeout",
         attempts=2,
-        tenant_id=TenantId("00000000-0000-4000-8000-000000000001"),
+        tenant_id=TenantId(str(uuid.uuid4())),
         enqueued_at=datetime.now(UTC),
         next_attempt_at=datetime.now(UTC),
         metadata={"source": "test"},
     )
+    before = await dlq.size()
     await dlq.put(record)
-    assert await dlq.size() == 1
-    claimed = await dlq.claim(limit=10)
-    assert len(claimed) == 1
-    assert claimed[0].id == "dlq-int-1"
-    await dlq.reschedule("dlq-int-1", next_attempt_at=datetime.now(UTC), error="retry")
-    await dlq.resolve("dlq-int-1")
-    assert await dlq.size() == 0
+    assert await dlq.size() == before + 1
+    claimed = await dlq.claim(limit=50)
+    assert any(item.id == record_id for item in claimed)
+    await dlq.reschedule(record_id, next_attempt_at=datetime.now(UTC), error="retry")
+    await dlq.resolve(record_id)
+    remaining = await dlq.claim(limit=50)
+    assert all(item.id != record_id for item in remaining)
 
 
 @pytest.mark.asyncio
 async def test_redis_circuit_breaker_falls_back_locally() -> None:
     class _Boom:
-        async def eval(self, *_args: object, **_kwargs: object) -> object:
+        async def eval(
+            self, script: str, numkeys: int, *keys_and_args: str | bytes | int | float
+        ) -> object:
+            del script, numkeys, keys_and_args
             raise RuntimeError("redis down")
 
-        async def hgetall(self, *_args: object, **_kwargs: object) -> dict[str, str]:
+        async def hgetall(self, name: str | bytes) -> dict[bytes, bytes]:
+            del name
             raise RuntimeError("redis down")
 
     registry = RedisCircuitBreakerRegistry(
-        _Boom(),  # type: ignore[arg-type]
+        _Boom(),
         failure_threshold=2,
         reset_timeout_seconds=30,
     )
